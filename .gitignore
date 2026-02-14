@@ -162,3 +162,10 @@ cython_debug/
 # Database files
 *.db
 database/*.db
+
+#Ignore runtime files and sensitive key material
+keys/
+uploads/
+__pycache__/
+*.pem
+*.enc
