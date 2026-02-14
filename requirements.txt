@@ -1,0 +1,8 @@
+# Cryptographic primitives and PKI tools
+cryptography
+
+# Modern GUI Library
+customtkinter
+
+# GUI utilities
+packaging
