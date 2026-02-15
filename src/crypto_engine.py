@@ -54,6 +54,34 @@ class CryptoEngine:
             hashes.SHA256()
         )
 
+    # -----------------------------------------
+    # NEW: RSA signature verification (Feature 1)
+    # -----------------------------------------
+    @staticmethod
+    def verify_signature(public_key_pem: str, data: bytes, signature: bytes) -> bool:
+        """
+        Verify RSA-PSS signature (SHA-256). Returns True if valid, False otherwise.
+        """
+        try:
+            public_key = serialization.load_pem_public_key(
+                public_key_pem.encode(),
+                backend=default_backend()
+            )
+
+            public_key.verify(
+                signature,
+                data,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            return True
+
+        except Exception:
+            return False
+
     # ==========================================================
     # NEW: Symmetric crypto (AES-256-GCM) to protect private keys
     # ==========================================================
