@@ -8,6 +8,7 @@ import os
 import shutil
 import re
 import subprocess
+import hashlib  # ✅ NEW: for SHA-256 file hashing
 
 db = DatabaseManager()
 crypto = CryptoEngine()
@@ -197,13 +198,30 @@ class DevTrustApp(ctk.CTk):
             if not self.f_path:
                 return messagebox.showerror("Error", "Select file first!")
 
+            # ✅ Read file bytes once and compute SHA-256 hash
+            try:
+                with open(self.f_path, "rb") as f:
+                    file_bytes = f.read()
+                file_hash = hashlib.sha256(file_bytes).hexdigest()
+            except Exception as ex:
+                return messagebox.showerror("Error", f"Could not read file for hashing: {ex}")
+
             # AES-at-rest: load decrypted private key (fallback to old .pem)
             priv = crypto.load_private_key_pem(self.current_user["email"], self.current_user["pwd"], keys_dir="keys")
 
             sig = crypto.sign_data(self.f_path, priv, self.current_user["pwd"])
 
             shutil.copy(self.f_path, os.path.join("uploads", "staging", os.path.basename(self.f_path)))
-            db.add_file_record(os.path.basename(self.f_path), self.current_user["email"], self.rev_cb.get(), sig, self.j_msg.get())
+
+            # ✅ Store hash in DB along with signature
+            db.add_file_record(
+                os.path.basename(self.f_path),
+                self.current_user["email"],
+                self.rev_cb.get(),
+                sig,
+                file_hash,
+                self.j_msg.get()
+            )
 
             messagebox.showinfo("Success", "Code Submitted for Secure Review!")
             self.show_dashboard()
