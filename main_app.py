@@ -8,45 +8,33 @@ import os
 import shutil
 import re
 import subprocess
-import hashlib  # ✅ NEW: for SHA-256 file hashing
+import hashlib
+import base64
 
 db = DatabaseManager()
 crypto = CryptoEngine()
 
 
 def find_vscode_launch_cmd():
-    """
-    Returns a list representing the VS Code launch command.
-    Tries:
-      1) `code` from PATH
-      2) Common Code.exe install paths
-    Returns None if VS Code is not found.
-    """
-    # 1) Try code in PATH
     code_in_path = shutil.which("code")
     if code_in_path:
         return [code_in_path]
 
-    # 2) Try common Windows installation paths for VS Code
     candidates = []
-
     localappdata = os.environ.get("LOCALAPPDATA", "")
     programfiles = os.environ.get("ProgramFiles", "")
     programfilesx86 = os.environ.get("ProgramFiles(x86)", "")
 
     if localappdata:
         candidates.append(os.path.join(localappdata, "Programs", "Microsoft VS Code", "Code.exe"))
-
     if programfiles:
         candidates.append(os.path.join(programfiles, "Microsoft VS Code", "Code.exe"))
-
     if programfilesx86:
         candidates.append(os.path.join(programfilesx86, "Microsoft VS Code", "Code.exe"))
 
     for path in candidates:
         if path and os.path.exists(path):
             return [path]
-
     return None
 
 
@@ -90,10 +78,8 @@ class DevTrustApp(ctk.CTk):
                 return messagebox.showerror("Error", "Account Not Found!")
 
             try:
-                # AES-at-rest: load decrypted private key container (fallback to old .pem)
                 data = crypto.load_private_key_pem(e.get(), p.get(), keys_dir="keys")
 
-                # Validate password unlocks the internal PKCS8 private key
                 serialization.load_pem_private_key(
                     data,
                     password=p.get().encode(),
@@ -120,13 +106,7 @@ class DevTrustApp(ctk.CTk):
         e_reg.pack(pady=10)
 
         r_var = ctk.StringVar(value="Junior Developer")
-        ctk.CTkComboBox(
-            frame,
-            values=["Junior Developer", "Senior Developer"],
-            variable=r_var,
-            state="readonly",
-            width=320
-        ).pack(pady=10)
+        ctk.CTkComboBox(frame, values=["Junior Developer", "Senior Developer"], variable=r_var, state="readonly", width=320).pack(pady=10)
 
         p_reg = ctk.CTkEntry(frame, placeholder_text="Set Password", show="*", width=320)
         p_reg.pack(pady=10)
@@ -141,8 +121,6 @@ class DevTrustApp(ctk.CTk):
                 return messagebox.showerror("Error", "Email and password are required!")
 
             priv, pub = crypto.generate_key_pair(p_reg.get())
-
-            # AES-256-GCM at rest
             crypto.encrypt_and_store_private_key(email, priv, p_reg.get(), keys_dir="keys")
 
             db.register_user(email, r_var.get(), pub.decode(), "CERT", "HASH")
@@ -198,7 +176,7 @@ class DevTrustApp(ctk.CTk):
             if not self.f_path:
                 return messagebox.showerror("Error", "Select file first!")
 
-            # ✅ Read file bytes once and compute SHA-256 hash
+            # SHA-256 hash
             try:
                 with open(self.f_path, "rb") as f:
                     file_bytes = f.read()
@@ -206,14 +184,11 @@ class DevTrustApp(ctk.CTk):
             except Exception as ex:
                 return messagebox.showerror("Error", f"Could not read file for hashing: {ex}")
 
-            # AES-at-rest: load decrypted private key (fallback to old .pem)
             priv = crypto.load_private_key_pem(self.current_user["email"], self.current_user["pwd"], keys_dir="keys")
-
             sig = crypto.sign_data(self.f_path, priv, self.current_user["pwd"])
 
             shutil.copy(self.f_path, os.path.join("uploads", "staging", os.path.basename(self.f_path)))
 
-            # ✅ Store hash in DB along with signature
             db.add_file_record(
                 os.path.basename(self.f_path),
                 self.current_user["email"],
@@ -306,7 +281,6 @@ class DevTrustApp(ctk.CTk):
                 except:
                     pass
 
-        # ✅ Isolated Review Environment: open isolated copy in dedicated VS Code window
         def open_file():
             staging_path = os.path.join("uploads", "staging", f_name)
             temp_path = review_copy_path()
@@ -336,13 +310,8 @@ class DevTrustApp(ctk.CTk):
                             "Then restart the app and try again."
                         )
 
-                    # Launch a dedicated VS Code window
-                    subprocess.Popen(
-                        vscode_cmd + ["--new-window", os.path.abspath(temp_path)],
-                        shell=False
-                    )
+                    subprocess.Popen(vscode_cmd + ["--new-window", os.path.abspath(temp_path)], shell=False)
                 else:
-                    # PDFs/images/docs -> default app (separate viewer)
                     os.startfile(os.path.abspath(temp_path))
             except Exception as ex:
                 messagebox.showerror("Error", f"Could not open file: {ex}")
@@ -355,20 +324,68 @@ class DevTrustApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(box, fg_color="transparent")
         btn_frame.pack(pady=20)
 
+        # ✅ Commit 3: Verify SHA-256 + RSA signature BEFORE approval
         def approve_action():
+            staging_path = os.path.join("uploads", "staging", f_name)
+
             try:
+                bundle = db.get_file_crypto_bundle(f_id)
+                if not bundle:
+                    return messagebox.showerror("Error", "DB record missing for this file!")
+
+                db_file_name, db_junior, db_signature, db_hash = bundle
+
+                if not os.path.exists(staging_path):
+                    return messagebox.showerror("Error", "File missing from staging. Possible tampering!")
+
+                # Recalculate hash
+                with open(staging_path, "rb") as f:
+                    current_bytes = f.read()
+                current_hash = hashlib.sha256(current_bytes).hexdigest()
+
+                if not db_hash or current_hash != db_hash:
+                    db.update_review(f_id, "REJECTED", "Auto-Rejected: SHA-256 hash mismatch (possible tampering).")
+                    box.destroy()
+                    messagebox.showerror("Blocked", "Rejected: Hash mismatch detected!")
+                    self.show_dashboard()
+                    return
+
+                # Verify signature using junior public key
+                pubkey_pem = db.get_public_key(db_junior)
+                if not pubkey_pem:
+                    db.update_review(f_id, "REJECTED", "Auto-Rejected: Junior public key not found.")
+                    box.destroy()
+                    messagebox.showerror("Blocked", "Rejected: Junior public key missing!")
+                    self.show_dashboard()
+                    return
+
+                # Signature might come as bytes or str; normalize to bytes
+                sig_bytes = db_signature
+                if isinstance(sig_bytes, str):
+                    try:
+                        sig_bytes = base64.b64decode(sig_bytes.encode())
+                    except:
+                        sig_bytes = sig_bytes.encode()
+
+                ok = crypto.verify_signature(pubkey_pem, current_bytes, sig_bytes)
+                if not ok:
+                    db.update_review(f_id, "REJECTED", "Auto-Rejected: RSA signature verification failed.")
+                    box.destroy()
+                    messagebox.showerror("Blocked", "Rejected: Signature verification failed!")
+                    self.show_dashboard()
+                    return
+
+                # Passed both checks -> Approve
                 db.update_review(f_id, "APPROVED", fb.get())
-                shutil.move(
-                    os.path.join("uploads", "staging", f_name),
-                    os.path.join("uploads", "prod_ready", f_name)
-                )
+                shutil.move(staging_path, os.path.join("uploads", "prod_ready", f_name))
+
             except Exception as ex:
                 return messagebox.showerror("Error", f"Approve failed: {ex}")
             finally:
                 cleanup_review_temp()
 
             box.destroy()
-            messagebox.showinfo("Success", "Approved!")
+            messagebox.showinfo("Success", "Approved (Hash + Signature Verified)!")
             self.show_dashboard()
 
         def reject_action():
