@@ -9,7 +9,6 @@ import shutil
 import re
 import subprocess
 import hashlib
-import base64
 
 db = DatabaseManager()
 crypto = CryptoEngine()
@@ -73,23 +72,28 @@ class DevTrustApp(ctk.CTk):
         ctk.CTkOptionMenu(frame, values=["Junior Developer", "Senior Developer"], variable=r_var, width=320).pack(pady=10)
 
         def login_action():
-            u = db.get_user_by_role(e.get(), r_var.get())
+            email = e.get().strip()
+            role = r_var.get().strip()
+
+            u = db.get_user_by_role(email, role)
             if not u:
+                db.log_event(email, role, "LOGIN_FAIL", "Account not found")
                 return messagebox.showerror("Error", "Account Not Found!")
 
             try:
-                data = crypto.load_private_key_pem(e.get(), p.get(), keys_dir="keys")
-
+                data = crypto.load_private_key_pem(email, p.get(), keys_dir="keys")
                 serialization.load_pem_private_key(
                     data,
                     password=p.get().encode(),
                     backend=default_backend()
                 )
 
-                self.current_user = {"email": e.get(), "role": r_var.get(), "pwd": p.get()}
+                self.current_user = {"email": email, "role": role, "pwd": p.get()}
+                db.log_event(email, role, "LOGIN_SUCCESS", "User authenticated successfully")
                 self.show_dashboard()
 
             except Exception:
+                db.log_event(email, role, "LOGIN_FAIL", "Invalid password or key decrypt failed")
                 messagebox.showerror("Error", "Invalid Password or Access Key!")
 
         ctk.CTkButton(frame, text="Login", command=login_action, width=250, height=45).pack(pady=20)
@@ -106,13 +110,20 @@ class DevTrustApp(ctk.CTk):
         e_reg.pack(pady=10)
 
         r_var = ctk.StringVar(value="Junior Developer")
-        ctk.CTkComboBox(frame, values=["Junior Developer", "Senior Developer"], variable=r_var, state="readonly", width=320).pack(pady=10)
+        ctk.CTkComboBox(
+            frame,
+            values=["Junior Developer", "Senior Developer"],
+            variable=r_var,
+            state="readonly",
+            width=320
+        ).pack(pady=10)
 
         p_reg = ctk.CTkEntry(frame, placeholder_text="Set Password", show="*", width=320)
         p_reg.pack(pady=10)
 
         def reg():
             email = e_reg.get().strip()
+            role = r_var.get().strip()
 
             if not re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email):
                 return messagebox.showerror("Error", "Use valid email format!")
@@ -121,11 +132,17 @@ class DevTrustApp(ctk.CTk):
                 return messagebox.showerror("Error", "Email and password are required!")
 
             priv, pub = crypto.generate_key_pair(p_reg.get())
+
             crypto.encrypt_and_store_private_key(email, priv, p_reg.get(), keys_dir="keys")
 
-            db.register_user(email, r_var.get(), pub.decode(), "CERT", "HASH")
-            messagebox.showinfo("Success", "Registered Successfully!")
-            self.show_login()
+            ok = db.register_user(email, role, pub.decode(), "CERT", "HASH")
+            if ok:
+                db.log_event(email, role, "REGISTER_SUCCESS", "New user registered")
+                messagebox.showinfo("Success", "Registered Successfully!")
+                self.show_login()
+            else:
+                db.log_event(email, role, "REGISTER_FAIL", "DB insert failed (duplicate user?)")
+                messagebox.showerror("Error", "Registration failed. User may already exist.")
 
         ctk.CTkButton(frame, text="Register", command=reg).pack(pady=20)
 
@@ -176,26 +193,33 @@ class DevTrustApp(ctk.CTk):
             if not self.f_path:
                 return messagebox.showerror("Error", "Select file first!")
 
-            # SHA-256 hash
-            try:
-                with open(self.f_path, "rb") as f:
-                    file_bytes = f.read()
-                file_hash = hashlib.sha256(file_bytes).hexdigest()
-            except Exception as ex:
-                return messagebox.showerror("Error", f"Could not read file for hashing: {ex}")
-
             priv = crypto.load_private_key_pem(self.current_user["email"], self.current_user["pwd"], keys_dir="keys")
             sig = crypto.sign_data(self.f_path, priv, self.current_user["pwd"])
 
-            shutil.copy(self.f_path, os.path.join("uploads", "staging", os.path.basename(self.f_path)))
+            # ✅ Commit 2: store SHA256 hash
+            with open(self.f_path, "rb") as f:
+                file_bytes = f.read()
+            file_hash = hashlib.sha256(file_bytes).hexdigest()
 
-            db.add_file_record(
+            staged_path = os.path.join("uploads", "staging", os.path.basename(self.f_path))
+            shutil.copy(self.f_path, staged_path)
+
+            f_id = db.add_file_record(
                 os.path.basename(self.f_path),
                 self.current_user["email"],
                 self.rev_cb.get(),
                 sig,
                 file_hash,
                 self.j_msg.get()
+            )
+
+            db.log_event(
+                self.current_user["email"],
+                self.current_user["role"],
+                "FILE_SUBMITTED",
+                f"Submitted file for review to {self.rev_cb.get()}",
+                file_id=f_id,
+                file_name=os.path.basename(self.f_path)
             )
 
             messagebox.showinfo("Success", "Code Submitted for Secure Review!")
@@ -220,9 +244,9 @@ class DevTrustApp(ctk.CTk):
         tabs.pack(pady=10, padx=20)
         tabs.add("Waiting for Review")
         tabs.add("Verification History")
+        tabs.add("Audit Logs")  # ✅ Commit 4 PoC
 
         wait = tabs.tab("Waiting for Review")
-
         scroll = ctk.CTkScrollableFrame(wait, width=1150, height=450, fg_color="#1a1a1a")
         scroll.pack(fill="both", expand=True)
 
@@ -249,6 +273,19 @@ class DevTrustApp(ctk.CTk):
 
         for r in db.get_reviewed_for_senior(self.current_user["email"]):
             tree_h.insert("", "end", values=r)
+
+        # ✅ Commit 4: Audit logs tab (PoC)
+        audit = tabs.tab("Audit Logs")
+        cols_a = ("ID", "User", "Role", "Action", "Details", "FileID", "FileName", "Time")
+
+        tree_a = ttk.Treeview(audit, columns=cols_a, show="headings", height=18)
+        for col in cols_a:
+            tree_a.heading(col, text=col)
+            tree_a.column(col, width=150)
+        tree_a.pack(fill="both", expand=True)
+
+        for r in db.get_audit_logs(200):
+            tree_a.insert("", "end", values=r)
 
     def open_review_box(self, f_id, f_name, junior, junior_msg):
         box = ctk.CTkToplevel(self)
@@ -310,7 +347,10 @@ class DevTrustApp(ctk.CTk):
                             "Then restart the app and try again."
                         )
 
-                    subprocess.Popen(vscode_cmd + ["--new-window", os.path.abspath(temp_path)], shell=False)
+                    subprocess.Popen(
+                        vscode_cmd + ["--new-window", os.path.abspath(temp_path)],
+                        shell=False
+                    )
                 else:
                     os.startfile(os.path.abspath(temp_path))
             except Exception as ex:
@@ -324,74 +364,68 @@ class DevTrustApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(box, fg_color="transparent")
         btn_frame.pack(pady=20)
 
-        # ✅ Commit 3: Verify SHA-256 + RSA signature BEFORE approval
+        # ✅ Commit 3 enforcement + ✅ Commit 4 audit logging
         def approve_action():
-            staging_path = os.path.join("uploads", "staging", f_name)
-
             try:
+                # Fetch original signature + hash from DB
                 bundle = db.get_file_crypto_bundle(f_id)
                 if not bundle:
-                    return messagebox.showerror("Error", "DB record missing for this file!")
+                    db.log_event(self.current_user["email"], self.current_user["role"], "APPROVE_FAIL", "Missing DB bundle", file_id=f_id, file_name=f_name)
+                    return messagebox.showerror("Error", "Missing database record bundle!")
 
-                db_file_name, db_junior, db_signature, db_hash = bundle
+                junior_id, file_name_db, signature_db, stored_hash = bundle
 
+                staging_path = os.path.join("uploads", "staging", f_name)
                 if not os.path.exists(staging_path):
-                    return messagebox.showerror("Error", "File missing from staging. Possible tampering!")
+                    db.log_event(self.current_user["email"], self.current_user["role"], "APPROVE_FAIL", "File missing in staging", file_id=f_id, file_name=f_name)
+                    return messagebox.showerror("Error", "File missing in staging!")
 
                 # Recalculate hash
                 with open(staging_path, "rb") as f:
-                    current_bytes = f.read()
-                current_hash = hashlib.sha256(current_bytes).hexdigest()
+                    current_hash = hashlib.sha256(f.read()).hexdigest()
 
-                if not db_hash or current_hash != db_hash:
-                    db.update_review(f_id, "REJECTED", "Auto-Rejected: SHA-256 hash mismatch (possible tampering).")
+                if current_hash != stored_hash:
+                    db.update_review(f_id, "REJECTED", "Blocked: Hash mismatch detected!")
+                    db.log_event(self.current_user["email"], self.current_user["role"], "APPROVAL_BLOCKED", "SHA256 hash mismatch", file_id=f_id, file_name=f_name)
                     box.destroy()
-                    messagebox.showerror("Blocked", "Rejected: Hash mismatch detected!")
-                    self.show_dashboard()
-                    return
+                    return messagebox.showerror("Blocked", "Rejected: Hash mismatch detected!")
 
-                # Verify signature using junior public key
-                pubkey_pem = db.get_public_key(db_junior)
-                if not pubkey_pem:
-                    db.update_review(f_id, "REJECTED", "Auto-Rejected: Junior public key not found.")
+                # Verify RSA signature
+                junior_pub = db.get_public_key(junior_id, "Junior Developer")
+                if not junior_pub:
+                    db.update_review(f_id, "REJECTED", "Blocked: Missing junior public key!")
+                    db.log_event(self.current_user["email"], self.current_user["role"], "APPROVAL_BLOCKED", "Missing junior public key", file_id=f_id, file_name=f_name)
                     box.destroy()
-                    messagebox.showerror("Blocked", "Rejected: Junior public key missing!")
-                    self.show_dashboard()
-                    return
+                    return messagebox.showerror("Blocked", "Rejected: Missing junior public key!")
 
-                # Signature might come as bytes or str; normalize to bytes
-                sig_bytes = db_signature
-                if isinstance(sig_bytes, str):
-                    try:
-                        sig_bytes = base64.b64decode(sig_bytes.encode())
-                    except:
-                        sig_bytes = sig_bytes.encode()
-
-                ok = crypto.verify_signature(pubkey_pem, current_bytes, sig_bytes)
+                ok = crypto.verify_signature(junior_pub, staging_path, signature_db)
                 if not ok:
-                    db.update_review(f_id, "REJECTED", "Auto-Rejected: RSA signature verification failed.")
+                    db.update_review(f_id, "REJECTED", "Blocked: Signature verification failed!")
+                    db.log_event(self.current_user["email"], self.current_user["role"], "APPROVAL_BLOCKED", "RSA signature verification failed", file_id=f_id, file_name=f_name)
                     box.destroy()
-                    messagebox.showerror("Blocked", "Rejected: Signature verification failed!")
-                    self.show_dashboard()
-                    return
+                    return messagebox.showerror("Blocked", "Rejected: Signature verification failed!")
 
-                # Passed both checks -> Approve
+                # Passed checks -> approve
                 db.update_review(f_id, "APPROVED", fb.get())
                 shutil.move(staging_path, os.path.join("uploads", "prod_ready", f_name))
+                db.log_event(self.current_user["email"], self.current_user["role"], "FILE_APPROVED", "Approved after hash+signature verification", file_id=f_id, file_name=f_name)
 
             except Exception as ex:
+                db.log_event(self.current_user["email"], self.current_user["role"], "APPROVE_FAIL", str(ex), file_id=f_id, file_name=f_name)
                 return messagebox.showerror("Error", f"Approve failed: {ex}")
             finally:
                 cleanup_review_temp()
 
             box.destroy()
-            messagebox.showinfo("Success", "Approved (Hash + Signature Verified)!")
+            messagebox.showinfo("Success", "Approved!")
             self.show_dashboard()
 
         def reject_action():
             try:
                 db.update_review(f_id, "REJECTED", fb.get())
+                db.log_event(self.current_user["email"], self.current_user["role"], "FILE_REJECTED", "Reviewer rejected the file", file_id=f_id, file_name=f_name)
             except Exception as ex:
+                db.log_event(self.current_user["email"], self.current_user["role"], "REJECT_FAIL", str(ex), file_id=f_id, file_name=f_name)
                 return messagebox.showerror("Error", f"Reject failed: {ex}")
             finally:
                 cleanup_review_temp()

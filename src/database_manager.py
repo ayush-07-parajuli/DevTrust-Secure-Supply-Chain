@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import datetime
 
 
 class DatabaseManager:
@@ -10,6 +11,11 @@ class DatabaseManager:
         db_path = os.path.join("database", "devtrust.db")
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
+
+        # Enable foreign keys (safe even if not used heavily yet)
+        self.cursor.execute("PRAGMA foreign_keys = ON;")
+        self.conn.commit()
+
         self.create_tables()
 
     def create_tables(self):
@@ -25,7 +31,7 @@ class DatabaseManager:
             )
         """)
 
-        # Files table (now includes file_hash)
+        # Files table (includes signature + hash + junior_msg)
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS Files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,28 +47,69 @@ class DatabaseManager:
                 reviewed_at TIMESTAMP
             )
         """)
+
+        # ✅ Audit logs table (Commit 4)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS AuditLogs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT,
+                user_role TEXT,
+                action TEXT,
+                details TEXT,
+                file_id INTEGER,
+                file_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         self.conn.commit()
 
-        # Backward-compatible migration: add file_hash if missing in older DB
+        # Backward compatible migration if older DB exists
         self._ensure_column("Files", "file_hash", "TEXT")
+        self._ensure_column("Files", "junior_msg", "TEXT")
+        self._ensure_column("Users", "password_hash", "TEXT")
 
     def _ensure_column(self, table_name, column_name, column_type):
-        """Safely adds a missing column to an existing SQLite table."""
-        self.cursor.execute(f"PRAGMA table_info({table_name})")
-        cols = [row[1] for row in self.cursor.fetchall()]
-        if column_name not in cols:
-            self.cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
-            self.conn.commit()
-
-    # ----------------------------
-    # User methods
-    # ----------------------------
-    def register_user(self, email, role, pub_key, cert, pwd):
         try:
-            self.cursor.execute(
-                "INSERT INTO Users VALUES (?, ?, ?, ?, ?)",
-                (email, role, pub_key, cert, pwd)
-            )
+            self.cursor.execute(f"PRAGMA table_info({table_name})")
+            cols = [row[1] for row in self.cursor.fetchall()]
+            if column_name not in cols:
+                self.cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                self.conn.commit()
+        except:
+            pass
+
+    # Audit logging API
+    def log_event(self, user_email, user_role, action, details=None, file_id=None, file_name=None):
+        try:
+            self.cursor.execute("""
+                INSERT INTO AuditLogs (user_email, user_role, action, details, file_id, file_name)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_email, user_role, action, details, file_id, file_name))
+            self.conn.commit()
+        except:
+            # Logging should never crash the app
+            pass
+
+    def get_audit_logs(self, limit=200):
+        self.cursor.execute("""
+            SELECT id, user_email, user_role, action, details, file_id, file_name, created_at
+            FROM AuditLogs
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
+        return self.cursor.fetchall()
+
+    # -------------------------
+    # Existing project methods
+    # -------------------------
+
+    def register_user(self, email, role, pub_key, cert, pwd_hash):
+        try:
+            self.cursor.execute("""
+                INSERT INTO Users (email, role, public_key, certificate, password_hash)
+                VALUES (?, ?, ?, ?, ?)
+            """, (email, role, pub_key, cert, pwd_hash))
             self.conn.commit()
             return True
         except:
@@ -72,33 +119,48 @@ class DatabaseManager:
         self.cursor.execute("SELECT * FROM Users WHERE email=? AND role=?", (email, role))
         return self.cursor.fetchone()
 
-    def get_public_key(self, email):
-        self.cursor.execute("SELECT public_key FROM Users WHERE email=?", (email,))
-        row = self.cursor.fetchone()
-        if not row:
-            return None
-        return row[0]
+    def get_public_key(self, email, role="Junior Developer"):
+        self.cursor.execute("SELECT public_key FROM Users WHERE email=? AND role=?", (email, role))
+        r = self.cursor.fetchone()
+        return r[0] if r else None
 
     def get_reviewers(self):
         self.cursor.execute("SELECT email FROM Users WHERE role='Senior Developer'")
-        return [row[0] for row in self.cursor.fetchall()]
+        return [r[0] for r in self.cursor.fetchall()]
 
-    # ----------------------------
-    # File methods
-    # ----------------------------
+    # now stores file_hash too
     def add_file_record(self, file_name, junior_id, reviewer_id, signature, file_hash, junior_msg, status="PENDING"):
         self.cursor.execute("""
             INSERT INTO Files (file_name, junior_id, target_reviewer_id, status, signature, file_hash, junior_msg, feedback)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (file_name, junior_id, reviewer_id, status, signature, file_hash, junior_msg, ""))
+        """, (
+            file_name,
+            junior_id,
+            reviewer_id,
+            status,
+            sqlite3.Binary(signature) if signature is not None else None,
+            file_hash,
+            junior_msg,
+            ""
+        ))
         self.conn.commit()
+        return self.cursor.lastrowid
+
+    def get_junior_activity(self, junior_email):
+        self.cursor.execute("""
+            SELECT id, file_name, target_reviewer_id, status, feedback, uploaded_at
+            FROM Files
+            WHERE junior_id=?
+            ORDER BY id DESC
+        """, (junior_email,))
+        return self.cursor.fetchall()
 
     def get_pending_for_senior(self, senior_email):
         self.cursor.execute("""
             SELECT id, file_name, junior_id, junior_msg
             FROM Files
             WHERE target_reviewer_id=? AND status='PENDING'
-            ORDER BY uploaded_at DESC
+            ORDER BY id DESC
         """, (senior_email,))
         return self.cursor.fetchall()
 
@@ -107,36 +169,23 @@ class DatabaseManager:
             SELECT id, file_name, junior_id, status, feedback
             FROM Files
             WHERE target_reviewer_id=? AND status IN ('APPROVED','REJECTED')
-            ORDER BY reviewed_at DESC
+            ORDER BY id DESC
         """, (senior_email,))
         return self.cursor.fetchall()
 
-    def get_junior_activity(self, junior_email):
-        self.cursor.execute("""
-            SELECT id, file_name, target_reviewer_id, status, feedback, uploaded_at
-            FROM Files
-            WHERE junior_id=?
-            ORDER BY uploaded_at DESC
-        """, (junior_email,))
-        return self.cursor.fetchall()
-
     def update_review(self, f_id, status, feedback):
-        import datetime
+        now = datetime.datetime.now()
         self.cursor.execute("""
             UPDATE Files
             SET status=?, feedback=?, reviewed_at=?
             WHERE id=?
-        """, (status, feedback, datetime.datetime.now(), f_id))
+        """, (status, feedback, now, f_id))
         self.conn.commit()
 
-    #  Fetch signature + hash + junior for crypto validation
+    # get signature + hash + junior for verification
     def get_file_crypto_bundle(self, f_id):
-        """
-        Returns:
-          (file_name, junior_id, signature, file_hash)
-        """
         self.cursor.execute("""
-            SELECT file_name, junior_id, signature, file_hash
+            SELECT junior_id, file_name, signature, file_hash
             FROM Files
             WHERE id=?
         """, (f_id,))
