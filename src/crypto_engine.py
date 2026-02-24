@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.backends import default_backend
 import os
 
+
 class CryptoEngine:
     # --- AES-at-rest settings ---
     _MAGIC = b"DEVTRUST-KEY-V1"  # file header to identify our encrypted key format
@@ -13,14 +14,14 @@ class CryptoEngine:
     _KDF_ITERS = 200_000  # strong enough for coursework; adjust if needed
 
     # ---------------------------
-    # Existing RSA key generation
+    # RSA key generation
     # ---------------------------
     @staticmethod
     def generate_key_pair(password: str):
         # RSA 2048-bit Key Generation
         private_key = rsa.generate_private_key(65537, 2048, default_backend())
 
-        # Keep this exactly as you had it: password-protected PKCS8 PEM
+        # password-protected PKCS8 PEM
         pem_private = private_key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
@@ -34,12 +35,14 @@ class CryptoEngine:
         return pem_private, pem_public
 
     # ---------------------------
-    # Existing signing logic
+    # Signing logic
     # ---------------------------
     @staticmethod
     def sign_data(file_path, private_key_pem: bytes, password: str):
         private_key = serialization.load_pem_private_key(
-            private_key_pem, password=password.encode(), backend=default_backend()
+            private_key_pem,
+            password=password.encode(),
+            backend=default_backend()
         )
 
         with open(file_path, "rb") as f:
@@ -54,19 +57,27 @@ class CryptoEngine:
             hashes.SHA256()
         )
 
-    # -----------------------------------------
-    # NEW: RSA signature verification (Feature 1)
-    # -----------------------------------------
+    # -------------------------------------------------------
+    # ✅ FIXED: RSA signature verification now accepts file_path
+    # -------------------------------------------------------
     @staticmethod
-    def verify_signature(public_key_pem: str, data: bytes, signature: bytes) -> bool:
+    def verify_signature(public_key_pem: str, file_path: str, signature: bytes) -> bool:
         """
-        Verify RSA-PSS signature (SHA-256). Returns True if valid, False otherwise.
+        Verify RSA-PSS signature (SHA-256) for a FILE on disk.
+        Returns True if valid, False otherwise.
         """
         try:
+            # SQLite can return BLOB as memoryview
+            if isinstance(signature, memoryview):
+                signature = signature.tobytes()
+
             public_key = serialization.load_pem_public_key(
                 public_key_pem.encode(),
                 backend=default_backend()
             )
+
+            with open(file_path, "rb") as f:
+                data = f.read()
 
             public_key.verify(
                 signature,
@@ -77,15 +88,15 @@ class CryptoEngine:
                 ),
                 hashes.SHA256()
             )
+
             return True
 
         except Exception:
             return False
 
     # ==========================================================
-    # NEW: Symmetric crypto (AES-256-GCM) to protect private keys
+    # AES-256-GCM to protect private keys at rest
     # ==========================================================
-
     @staticmethod
     def _derive_aes_key_from_password(password: str, salt: bytes) -> bytes:
         """Derive a 256-bit AES key from a password using PBKDF2-HMAC-SHA256."""
