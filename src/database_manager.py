@@ -63,7 +63,8 @@ class DatabaseManager:
             )
         """)
 
-        # ✅ Audit logs table (Commit 4)
+        # ✅ Audit logs table 
+        # AuditLogs table supports accountability and forensic readiness by recording security events.
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS AuditLogs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +96,7 @@ class DatabaseManager:
             pass
 
     # Audit logging API
+    # Security logging must never crash the application (best-effort logging).
     def log_event(self, user_email, user_role, action, details=None, file_id=None, file_name=None):
         try:
             self.cursor.execute("""
