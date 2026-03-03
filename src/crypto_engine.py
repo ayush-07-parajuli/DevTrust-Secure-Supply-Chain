@@ -31,6 +31,9 @@ class CryptoEngine:
     # ---------------------------
     # RSA key generation
     # ---------------------------
+
+    # Generates an RSA-2048 key pair.
+    # Private key is exported as PKCS8 and encrypted with the user's password (BestAvailableEncryption).
     @staticmethod
     def generate_key_pair(password: str):
         # RSA 2048-bit Key Generation
@@ -52,6 +55,10 @@ class CryptoEngine:
     # ---------------------------
     # Signing logic
     # ---------------------------
+
+    # Signs the entire file content using RSA-PSS + SHA-256.
+    # This provides integrity, authenticity, and non-repudiation for submitted artefacts.
+
     @staticmethod
     def sign_data(file_path, private_key_pem: bytes, password: str):
         private_key = serialization.load_pem_private_key(
@@ -75,6 +82,10 @@ class CryptoEngine:
     # -------------------------------------------------------
     # ✅ FIXED: RSA signature verification now accepts file_path
     # -------------------------------------------------------
+
+    # Verifies RSA-PSS + SHA-256 signature against the current file bytes.
+    # Returns False on any verification error to fail-safe (deny by default).
+
     @staticmethod
     def verify_signature(public_key_pem: str, file_path: str, signature: bytes) -> bool:
         """
@@ -112,6 +123,10 @@ class CryptoEngine:
     # ==========================================================
     # AES-256-GCM to protect private keys at rest
     # ==========================================================
+
+    # Derives a 256-bit AES key from the user's password using PBKDF2-HMAC-SHA256.
+    # Salt ensures uniqueness; iterations slow down offline guessing attempts.
+
     @staticmethod
     def _derive_aes_key_from_password(password: str, salt: bytes) -> bytes:
         """Derive a 256-bit AES key from a password using PBKDF2-HMAC-SHA256."""
@@ -124,6 +139,9 @@ class CryptoEngine:
         )
         return kdf.derive(password.encode())
 
+    # Encrypts the password-protected private key PEM again using AES-256-GCM for at-rest protection.
+    # GCM provides confidentiality + integrity; nonce must be unique per encryption.
+  
     @staticmethod
     def encrypt_and_store_private_key(email: str, private_key_pem: bytes, password: str, keys_dir: str = "keys"):
         """
