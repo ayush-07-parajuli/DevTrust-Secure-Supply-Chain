@@ -1,3 +1,18 @@
+"""
+CryptoEngine Module
+-------------------
+
+Implements cryptographic operations for DevTrust including:
+
+- RSA-2048 key generation
+- RSA-PSS digital signature creation and verification
+- SHA-256 hashing (used in signature workflow)
+- AES-256-GCM private key encryption at rest
+- PBKDF2-HMAC-SHA256 key derivation
+
+This module enforces authenticity, integrity,
+non-repudiation, and confidentiality controls.
+"""
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC

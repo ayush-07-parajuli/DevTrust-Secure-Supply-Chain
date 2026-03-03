@@ -1,3 +1,18 @@
+"""
+DatabaseManager Module
+----------------------
+
+Handles SQLite database operations for DevTrust.
+
+Responsibilities:
+- User registration and public key storage
+- File submission records (including hash and signature)
+- Audit logging of security events
+- Secure workflow state management
+
+This module supports accountability, traceability,
+and cryptographic enforcement logic.
+"""
 import sqlite3
 import os
 import datetime

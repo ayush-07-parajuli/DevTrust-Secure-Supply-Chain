@@ -1,3 +1,19 @@
+
+"""
+DevTrust Main Application
+
+Graphical interface for the secure supply chain verifier.
+
+Implements:
+- User registration and login
+- Cryptographic file submission workflow
+- Signature and hash enforcement during approval
+- Audit log viewing
+- Secure artefact promotion from staging to prod_ready
+
+This application demonstrates practical implementation
+of asymmetric and symmetric cryptographic controls.
+"""
 import customtkinter as ctk
 from tkinter import messagebox, filedialog, ttk
 from src.database_manager import DatabaseManager
