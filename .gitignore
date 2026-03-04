@@ -162,3 +162,22 @@ cython_debug/
 # Database files
 *.db
 database/*.db
+
+# DevTrust runtime / sensitive data (DO NOT COMMIT)
+keys/
+*.enc
+*.pem
+
+uploads/
+uploads/staging/
+uploads/prod_ready/
+uploads/review_temp/
+
+# Optional: sqlite journals
+*.db-journal
+*.sqlite3-journal
+
+# Optional: Windows noise
+Thumbs.db
+
+database/
