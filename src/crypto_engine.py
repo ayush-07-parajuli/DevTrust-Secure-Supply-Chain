@@ -1,9 +1,25 @@
+"""
+CryptoEngine Module
+-------------------
+
+Implements cryptographic operations for DevTrust including:
+
+- RSA-2048 key generation
+- RSA-PSS digital signature creation and verification
+- SHA-256 hashing (used in signature workflow)
+- AES-256-GCM private key encryption at rest
+- PBKDF2-HMAC-SHA256 key derivation
+
+This module enforces authenticity, integrity,
+non-repudiation, and confidentiality controls.
+"""
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.backends import default_backend
 import os
+
 
 class CryptoEngine:
     # --- AES-at-rest settings ---
@@ -13,14 +29,17 @@ class CryptoEngine:
     _KDF_ITERS = 200_000  # strong enough for coursework; adjust if needed
 
     # ---------------------------
-    # Existing RSA key generation
+    # RSA key generation
     # ---------------------------
+
+    # Generates an RSA-2048 key pair.
+    # Private key is exported as PKCS8 and encrypted with the user's password (BestAvailableEncryption).
     @staticmethod
     def generate_key_pair(password: str):
         # RSA 2048-bit Key Generation
         private_key = rsa.generate_private_key(65537, 2048, default_backend())
 
-        # Keep this exactly as you had it: password-protected PKCS8 PEM
+        # password-protected PKCS8 PEM
         pem_private = private_key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
@@ -34,12 +53,18 @@ class CryptoEngine:
         return pem_private, pem_public
 
     # ---------------------------
-    # Existing signing logic
+    # Signing logic
     # ---------------------------
+
+    # Signs the entire file content using RSA-PSS + SHA-256.
+    # This provides integrity, authenticity, and non-repudiation for submitted artefacts.
+
     @staticmethod
     def sign_data(file_path, private_key_pem: bytes, password: str):
         private_key = serialization.load_pem_private_key(
-            private_key_pem, password=password.encode(), backend=default_backend()
+            private_key_pem,
+            password=password.encode(),
+            backend=default_backend()
         )
 
         with open(file_path, "rb") as f:
@@ -54,9 +79,53 @@ class CryptoEngine:
             hashes.SHA256()
         )
 
+    # -------------------------------------------------------
+    # ✅ FIXED: RSA signature verification now accepts file_path
+    # -------------------------------------------------------
+
+    # Verifies RSA-PSS + SHA-256 signature against the current file bytes.
+    # Returns False on any verification error to fail-safe (deny by default).
+
+    @staticmethod
+    def verify_signature(public_key_pem: str, file_path: str, signature: bytes) -> bool:
+        """
+        Verify RSA-PSS signature (SHA-256) for a FILE on disk.
+        Returns True if valid, False otherwise.
+        """
+        try:
+            # SQLite can return BLOB as memoryview
+            if isinstance(signature, memoryview):
+                signature = signature.tobytes()
+
+            public_key = serialization.load_pem_public_key(
+                public_key_pem.encode(),
+                backend=default_backend()
+            )
+
+            with open(file_path, "rb") as f:
+                data = f.read()
+
+            public_key.verify(
+                signature,
+                data,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+
+            return True
+
+        except Exception:
+            return False
+
     # ==========================================================
-    # NEW: Symmetric crypto (AES-256-GCM) to protect private keys
+    # AES-256-GCM to protect private keys at rest
     # ==========================================================
+
+    # Derives a 256-bit AES key from the user's password using PBKDF2-HMAC-SHA256.
+    # Salt ensures uniqueness; iterations slow down offline guessing attempts.
 
     @staticmethod
     def _derive_aes_key_from_password(password: str, salt: bytes) -> bytes:
@@ -70,6 +139,9 @@ class CryptoEngine:
         )
         return kdf.derive(password.encode())
 
+    # Encrypts the password-protected private key PEM again using AES-256-GCM for at-rest protection.
+    # GCM provides confidentiality + integrity; nonce must be unique per encryption.
+  
     @staticmethod
     def encrypt_and_store_private_key(email: str, private_key_pem: bytes, password: str, keys_dir: str = "keys"):
         """

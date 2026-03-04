@@ -163,21 +163,27 @@ cython_debug/
 *.db
 database/*.db
 
+
 # DevTrust runtime / sensitive data (DO NOT COMMIT)
 keys/
-*.enc
-*.pem
-
 uploads/
 uploads/staging/
 uploads/prod_ready/
 uploads/review_temp/
 
-# Optional: sqlite journals
+# Private keys
+*.enc
+*.pem
+
+# Python cache
+__pycache__/
+
+# Database
+database/
+*.db
 *.db-journal
 *.sqlite3-journal
 
-# Optional: Windows noise
+# Optional Windows noise
 Thumbs.db
 
-database/
